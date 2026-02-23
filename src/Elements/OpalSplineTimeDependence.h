@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Chris Rogers
+ *  Copyright (c) 2018, Chris Rogers
  *  All rights reserved.
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions are met:
@@ -25,40 +25,51 @@
  *  POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "Algorithms/AbstractTimeDependence.h"
-#include "Utilities/GeneralClassicException.h"
-#include <sstream>
-#include <utility>
+#ifndef OPAL_OpalSplineTimeDependence_HH
+#define OPAL_OpalSplineTimeDependence_HH
 
-std::map<std::string, std::shared_ptr<AbstractTimeDependence> > AbstractTimeDependence::td_map =
-    std::map<std::string, std::shared_ptr<AbstractTimeDependence> >();
+#include "Elements/OpalElement.h"
 
-std::shared_ptr<AbstractTimeDependence> AbstractTimeDependence::getTimeDependence(
-        const std::string& name) {
-    const auto pos = td_map.find(name);
-    if (pos == td_map.end()) {
-        throw GeneralClassicException(
-            "AbstractTimeDependence::getTimeDependence",
-            "Could not find TimeDependence called " + name);
-    }
-    return pos->second;
-}
+/** OpalSplineTimeDependence provides UI wrapper for the
+ *  SplineTimeDependence
+ */
 
-void AbstractTimeDependence::setTimeDependence(
-    const std::string& name, std::shared_ptr<AbstractTimeDependence> time_dep) {
-    td_map[name] = std::move(time_dep);
-}
+class OpalSplineTimeDependence : public OpalElement {
+public:
+    /** Enumeration maps to UI parameters */
+    enum {
+        ORDER = COMMON,
+        TIMES,
+        VALUES,
+        SIZE  // size of the enum
+    };
 
-std::string AbstractTimeDependence::getName(
-    const std::shared_ptr<AbstractTimeDependence>& time_dep) {
-    for (auto& [name, dep] : td_map) {
-        if (dep == time_dep) {
-            return name;
-        }
-    }
-    std::stringstream ss;
-    ss << time_dep;
-    throw GeneralClassicException(
-        "AbstractTimeDependence::getTimeDependence",
-        "Could not find TimeDependence with address " + ss.str());
-}
+    /** Define mapping from enum variables to string UI parameter names */
+    OpalSplineTimeDependence();
+
+    /** No memory allocated so does nothing */
+    ~OpalSplineTimeDependence() override = default;
+
+    /** Inherited copy constructor */
+    OpalSplineTimeDependence* clone(const std::string& name) override;
+
+    /** Receive parameters from the parser and hand them off to the
+     *  SplineTimeDependence
+     */
+    void update() override;
+
+    /** Calls print on the OpalElement */
+    void print(std::ostream&) const override;
+
+    // Not implemented.
+    OpalSplineTimeDependence(const OpalSplineTimeDependence&) = delete;
+    void operator=(const OpalSplineTimeDependence&) = delete;
+
+private:
+    // Clone constructor.
+    OpalSplineTimeDependence(const std::string& name, OpalSplineTimeDependence* parent);
+
+    static const std::string doc_string;
+};
+
+#endif  // OPAL_OpalSplineTimeDependence_HH
