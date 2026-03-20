@@ -29,9 +29,9 @@
 #include "AbsBeamline/MultipoleT.h"
 #include "gtest/gtest.h"
 
-class TestMultipoleTStraight : public testing::Test, public MultipoleT {
+class TestMultipoleTCurvedConstRadius : public testing::Test, public MultipoleT {
 public:
-    TestMultipoleTStraight() : MultipoleT("Magnet") {}
+    TestMultipoleTCurvedConstRadius() : MultipoleT("Magnet") {}
 
 protected:
     static void SetUpTestSuite() {
@@ -44,16 +44,21 @@ protected:
     // Test helper functions
     static Vector_t<double, 3> curvilinearToGlobal(
         const Vector_t<double, 3>& local, const Vector_t<double, 3>& elementEntry,
-        const double elementLength) {
-        const double x = local[0] + elementEntry[0];
-        const double y = local[1] + elementEntry[1];
-        const double z = local[2] + elementLength / 2 + elementEntry[2];
+        const double elementLength, const double bendAngle) {
+        const auto radius  = elementLength / bendAngle;
+        const double s     = local[2] + elementLength / 2.0;
+        const auto cosSbyR = std::cos(s / radius);
+        const auto sinSbyR = std::sin(s / radius);
+        const double x     = radius - (local[0] + radius) * cosSbyR + elementEntry[0];
+        const double y     = local[1] + elementEntry[1];
+        const double z     = (local[0] + radius) * sinSbyR + elementEntry[2];
         return {x, y, z};
     }
 
     void grabTransverseDataLine(
         std::vector<double>& line, const double s, const double width,
-        const Vector_t<double, 3>& elementEntry, const double elementLength) const {
+        const Vector_t<double, 3>& elementEntry, const double elementLength,
+        const double bendAngle) const {
         // Create the views
         std::vector<Vector_t<double, 3>> local;
         Kokkos::View<Vector_t<double, 3>*> R;
@@ -69,7 +74,7 @@ protected:
         const double stepSize = width / static_cast<double>(line.size() - 1);
         for (size_t i = 0; i < line.size(); ++i) {
             local[i] = {i * stepSize - width / 2, 0, s};
-            hostR(i) = curvilinearToGlobal(local[i], elementEntry, elementLength);
+            hostR(i) = curvilinearToGlobal(local[i], elementEntry, elementLength, bendAngle);
         }
         Kokkos::deep_copy(R, hostR);
         // Get the fields
@@ -87,14 +92,15 @@ protected:
     void grabLongitudinalDivCurlLine(
         std::vector<double>& fieldLine, std::vector<double>& divLine,
         std::vector<Vector_t<double, 3>>& curlLine, const double x, const double length,
-        const Vector_t<double, 3>& elementEntry, const double elementLength, const double dr) {
+        const Vector_t<double, 3>& elementEntry, const double elementLength, const double bendAngle,
+        const double dr) {
         const double stepSize = length / static_cast<double>(divLine.size() - 1);
         const double startS   = 0 - (elementLength - length) / 2;
         for (size_t i = 0; i < divLine.size(); ++i) {
             // Get the sourrounding 6 B fields
             Vector_t<double, 3> local{x, 0, i * stepSize + startS};
             Vector_t<double, 3> R =
-                curvilinearToGlobal(local, elementEntry, elementLength);
+                curvilinearToGlobal(local, elementEntry, elementLength, bendAngle);
             Vector_t<double, 3> B;
             Vector_t<double, 3> Bxp;
             Vector_t<double, 3> Bxm;
@@ -122,11 +128,11 @@ protected:
     }
 };
 
-TEST_F(TestMultipoleTStraight, Dipole) {
+TEST_F(TestMultipoleTCurvedConstRadius, Dipole) {
     std::vector<double> line(101);
     // Set up the magnet
     constexpr double length      = 4.4;
-    constexpr double bendAngle   = 0.0;
+    constexpr double bendAngle   = M_PI / 8.0;
     constexpr double dipoleField = 1.0;
     setBendAngle(bendAngle, false);
     setElementLength(length);
@@ -137,24 +143,24 @@ TEST_F(TestMultipoleTStraight, Dipole) {
     setMaxOrder(5, 10);
     // Check dipole has the correct constant transverse field magnitude at the center
     setTransProfile({dipoleField});
-    grabTransverseDataLine(line, 0, 3.0, {0, 0, 0}, length);
+    grabTransverseDataLine(line, 0, 3.0, {0, 0, 0}, length, bendAngle);
     for (const double val : line) {
         EXPECT_NEAR(val, dipoleField, 1e-2);
     }
     // Check dipole has the correct constant transverse field magnitude at the edge
     setTransProfile({dipoleField});
-    grabTransverseDataLine(line, -length / 2, 3.0, {0, 0, 0}, length);
+    grabTransverseDataLine(line, -length / 2, 3.0, {0, 0, 0}, length, bendAngle);
     for (const double val : line) {
         EXPECT_NEAR(val, dipoleField / 2, 1e-2);
     }
 }
 
-TEST_F(TestMultipoleTStraight, Quadrupole) {
+TEST_F(TestMultipoleTCurvedConstRadius, Quadrupole) {
     constexpr unsigned int samplesPerSide = 50;
     std::vector<double> line(2 * samplesPerSide + 1);
     // Set up the magnet
     constexpr double length          = 4.4;
-    constexpr double bendAngle       = 0.0;
+    constexpr double bendAngle       = M_PI / 8.0;
     constexpr double quadrupoleField = 1.0;
     setBendAngle(bendAngle, false);
     setElementLength(length);
@@ -165,7 +171,7 @@ TEST_F(TestMultipoleTStraight, Quadrupole) {
     setMaxOrder(5, 10);
     // Check quadrupole has linear field magnitude at the center
     setTransProfile({0, quadrupoleField});
-    grabTransverseDataLine(line, 0, 3.0, {0, 0, 0}, length);
+    grabTransverseDataLine(line, 0, 3.0, {0, 0, 0}, length, bendAngle);
     double expected = 0;
     double delta    = line[samplesPerSide + 1] - line[samplesPerSide];
     EXPECT_NEAR(delta, 0.03, 1e-5);
@@ -177,7 +183,7 @@ TEST_F(TestMultipoleTStraight, Quadrupole) {
     }
     // Check quadrupole has linear field magnitude at the edge with half the slope
     setTransProfile({0, quadrupoleField});
-    grabTransverseDataLine(line, -length / 2, 3.0, {0, 0, 0}, length);
+    grabTransverseDataLine(line, -length / 2, 3.0, {0, 0, 0}, length, bendAngle);
     expected = 0;
     delta    = line[samplesPerSide + 1] - line[samplesPerSide];
     EXPECT_NEAR(delta, 0.015, 1e-5);
@@ -189,12 +195,12 @@ TEST_F(TestMultipoleTStraight, Quadrupole) {
     }
 }
 
-TEST_F(TestMultipoleTStraight, Sextupole) {
+TEST_F(TestMultipoleTCurvedConstRadius, Sextupole) {
     constexpr unsigned int samplesPerSide = 50;
     std::vector<double> line(2 * samplesPerSide + 1);
     // Set up the magnet
     constexpr double length         = 4.4;
-    constexpr double bendAngle      = 0.0;
+    constexpr double bendAngle      = M_PI / 8.0;
     constexpr double sextupoleField = 1.0;
     setBendAngle(bendAngle, false);
     setElementLength(length);
@@ -205,7 +211,7 @@ TEST_F(TestMultipoleTStraight, Sextupole) {
     setMaxOrder(5, 10);
     // Check sextupole has quadratic field magnitude at the center
     setTransProfile({0, 0, sextupoleField});
-    grabTransverseDataLine(line, 0, 3.0, {0, 0, 0}, length);
+    grabTransverseDataLine(line, 0, 3.0, {0, 0, 0}, length, bendAngle);
     double expected = 0;
     double delta    = std::sqrt(line[samplesPerSide + 1] - line[samplesPerSide]);
     EXPECT_NEAR(delta, 0.03, 1e-5);
@@ -217,7 +223,7 @@ TEST_F(TestMultipoleTStraight, Sextupole) {
     }
     // Check sextupole has quadratic field magnitude at the edge with half the slope
     setTransProfile({0, 0, sextupoleField});
-    grabTransverseDataLine(line, -length / 2, 3.0, {0, 0, 0}, length);
+    grabTransverseDataLine(line, -length / 2, 3.0, {0, 0, 0}, length, bendAngle);
     expected = 0;
     delta    = std::sqrt(line[samplesPerSide + 1] - line[samplesPerSide]);
     EXPECT_NEAR(delta, 0.02121, 1e-5);
@@ -229,13 +235,13 @@ TEST_F(TestMultipoleTStraight, Sextupole) {
     }
 }
 
-TEST_F(TestMultipoleTStraight, Octupole) {
+TEST_F(TestMultipoleTCurvedConstRadius, Octupole) {
     constexpr unsigned int samplesPerSide = 50;
     std::vector<double> line(2 * samplesPerSide + 1);
     // Set up the magnet
-    constexpr double length        = 4.4;
-    constexpr double bendAngle     = 0.0;
-    constexpr double octupoleField = 1.0;
+    constexpr double length         = 4.4;
+    constexpr double bendAngle      = M_PI / 8.0;
+    constexpr double sextupoleField = 1.0;
     setBendAngle(bendAngle, false);
     setElementLength(length);
     setAperture(3.5, 3.5);
@@ -244,8 +250,8 @@ TEST_F(TestMultipoleTStraight, Octupole) {
     setEntranceAngle(0.0);
     setMaxOrder(5, 10);
     // Check octupole has cubic field magnitude at the center
-    setTransProfile({0, 0, 0, octupoleField});
-    grabTransverseDataLine(line, 0, 3.0, {0, 0, 0}, length);
+    setTransProfile({0, 0, 0, sextupoleField});
+    grabTransverseDataLine(line, 0, 3.0, {0, 0, 0}, length, bendAngle);
     double expected = 0;
     double delta    = std::cbrt(line[samplesPerSide + 1] - line[samplesPerSide]);
     EXPECT_NEAR(delta, 0.03, 1e-5);
@@ -256,8 +262,8 @@ TEST_F(TestMultipoleTStraight, Octupole) {
         EXPECT_NEAR(line[samplesPerSide + i + 1], expected, 1e-2);
     }
     // Check octupole has cubic field magnitude at the edge with half the slope
-    setTransProfile({0, 0, 0, octupoleField});
-    grabTransverseDataLine(line, -length / 2, 3.0, {0, 0, 0}, length);
+    setTransProfile({0, 0, 0, sextupoleField});
+    grabTransverseDataLine(line, -length / 2, 3.0, {0, 0, 0}, length, bendAngle);
     expected = 0;
     delta    = std::cbrt(line[samplesPerSide + 1] - line[samplesPerSide]);
     EXPECT_NEAR(delta, 0.023811, 1e-5);
@@ -269,12 +275,12 @@ TEST_F(TestMultipoleTStraight, Octupole) {
     }
 }
 
-TEST_F(TestMultipoleTStraight, Decapole) {
+TEST_F(TestMultipoleTCurvedConstRadius, Decapole) {
     constexpr unsigned int samplesPerSide = 50;
     std::vector<double> line(2 * samplesPerSide + 1);
     // Set up the magnet
     constexpr double length        = 4.4;
-    constexpr double bendAngle     = 0.0;
+    constexpr double bendAngle     = M_PI / 8.0;
     constexpr double decapoleField = 1.0;
     setBendAngle(bendAngle, false);
     setElementLength(length);
@@ -285,7 +291,7 @@ TEST_F(TestMultipoleTStraight, Decapole) {
     setMaxOrder(5, 10);
     // Check decapole has quartic field magnitude at the center
     setTransProfile({0, 0, 0, 0, decapoleField});
-    grabTransverseDataLine(line, 0, 3.0, {0, 0, 0}, length);
+    grabTransverseDataLine(line, 0, 3.0, {0, 0, 0}, length, bendAngle);
     double expected = 0;
     double delta    = std::pow(line[samplesPerSide + 1] - line[samplesPerSide], 1.0 / 4.0);
     EXPECT_NEAR(delta, 0.03, 1e-5);
@@ -297,7 +303,7 @@ TEST_F(TestMultipoleTStraight, Decapole) {
     }
     // Check decapole has quartic field magnitude at the edge with half the slope
     setTransProfile({0, 0, 0, 0, decapoleField});
-    grabTransverseDataLine(line, -length / 2, 3.0, {0, 0, 0}, length);
+    grabTransverseDataLine(line, -length / 2, 3.0, {0, 0, 0}, length, bendAngle);
     expected = 0;
     delta    = std::pow(line[samplesPerSide + 1] - line[samplesPerSide], 1.0 / 4.0);
     EXPECT_NEAR(delta, 0.025227, 1e-5);
@@ -309,7 +315,7 @@ TEST_F(TestMultipoleTStraight, Decapole) {
     }
 }
 
-TEST_F(TestMultipoleTStraight, DivCurl) {
+TEST_F(TestMultipoleTCurvedConstRadius, DivCurl) {
     constexpr unsigned int samplesPerSide = 20;
     std::vector<double> divLine(2 * samplesPerSide + 1);
     std::vector<double> fieldLine(2 * samplesPerSide + 1);
@@ -317,7 +323,7 @@ TEST_F(TestMultipoleTStraight, DivCurl) {
     constexpr double dr = 0.001;
     // Set up the magnet
     constexpr double length    = 4.4;
-    constexpr double bendAngle = 0.0;
+    constexpr double bendAngle = M_PI / 8.0;
     setBendAngle(bendAngle, false);
     setElementLength(length);
     setAperture(3.5, 3.5);
@@ -328,7 +334,7 @@ TEST_F(TestMultipoleTStraight, DivCurl) {
     setTransProfile({1, 1, 1, 1, 1});
     // Get the data
     grabLongitudinalDivCurlLine(
-        fieldLine, divLine, curlLine, 0, length * 1.5, {}, length, dr);
+        fieldLine, divLine, curlLine, 0, length * 1.5, {}, length, bendAngle, dr);
     // Analyse the results
     for (size_t i = 0; i < divLine.size(); ++i) {
         const double divError = std::abs(divLine[i]) * dr / fieldLine[i];
