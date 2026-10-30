@@ -17,6 +17,7 @@
 #include "NBody/core/BHFieldLists.hpp"
 #include "NBody/wrappers/NBodyKokkosView.hpp"
 #include "ryoanji/interface/multipole_holder.cuh"
+#include "ryoanji/nbody/gauss2_qpole.hpp"
 #include "ryoanji/nbody/heaviside_qpole.hpp"
 #include "ryoanji/nbody/traversal_cpu.hpp"
 
@@ -869,11 +870,111 @@ namespace opalx::spacecharge {
 
         /// Image charges of the plane as one multipole with per-particle velocities.
         struct FarImageMultipole {
-            ryoanji::HeavisideQpole<double> multipole;  ///< Evaluation form.
+            ryoanji::HeavisideQpole<double> multipole;  ///< Evaluation form (BHVELOCITYMULTIPOLE=TAYLOR).
+            ryoanji::Gauss2Qpole<double> gauss;  ///< Evaluation form (BHVELOCITYMULTIPOLE=GAUSS).
+            bool gaussNodes = false;  ///< gauss holds the multipole.
             ryoanji::Vec3<double> centre{0.0, 0.0, 0.0};  ///< Tree frame.
-            double macScale2 = 1.0;  ///< heavisideMacScale2; negative: too wide in rapidity.
+            double macScale2 = 1.0;  ///< velocity MAC scale; negative: too wide in rapidity.
             bool empty       = true;
         };
+
+        /**
+         * @brief farImageMultipole with two rapidity nodes (BHVELOCITYMULTIPOLE=GAUSS): raw
+         * Gauss2Qpole moments about the |q|-weighted centre and mean rapidity of the images (first
+         * reduction), then about them (second reduction, the per-source terms of P2MGauss2_add).
+         */
+        FarImageMultipole farImageMultipoleGauss2(
+                BarnesHutAlgorithm::ParticleContainer& particles, ZStretch stretch, double planeZ,
+                double chargeScale, const ryoanji::HeavisideFrame<double>& frame, double thetaV,
+                bool velocityMoments) {
+            using ryoanji::G2i;
+            const auto R           = particles.R.getView();
+            const auto P           = particles.P.getView();
+            const auto dt          = particles.dt.getView();
+            const size_type nLocal = particles.getLocalNum();
+            const double wRef      = frame.wRef;
+
+            // sum |q|, sum |q| w^, sum |q| r~ of the images, and their rapidity range
+            constexpr unsigned kFirst = 5;
+            ippl::Vector<double, kFirst> first(0.0);
+            Kokkos::parallel_reduce(
+                    "BarnesHutAlgorithm::farImageGaussCentre", nLocal,
+                    KOKKOS_LAMBDA(const size_type i, ippl::Vector<double, kFirst>& sum) {
+                        const double aq = chargeScale * dt(i);
+                        const double w  = -longitudinalRapidity(P(i)) - wRef;
+                        sum[0] += aq;
+                        sum[1] += aq * w;
+                        sum[2] += aq * R(i)[0];
+                        sum[3] += aq * R(i)[1];
+                        sum[4] += aq * (2.0 * planeZ - stretch.apply(R(i)[2]));
+                    },
+                    first);
+            using MinMax = Kokkos::MinMax<double>;
+            typename MinMax::value_type range;
+            Kokkos::parallel_reduce(
+                    "BarnesHutAlgorithm::farImageGaussRapidities", nLocal,
+                    KOKKOS_LAMBDA(const size_type i, typename MinMax::value_type& update) {
+                        const double w = -longitudinalRapidity(P(i)) - wRef;
+                        update.min_val = w < update.min_val ? w : update.min_val;
+                        update.max_val = w > update.max_val ? w : update.max_val;
+                    },
+                    MinMax(range));
+            std::array<double, kFirst> sums{};
+            for (unsigned c = 0; c < kFirst; ++c) {
+                sums[c] = first[c];
+            }
+            ippl::Comm->allreduce(sums.data(), kFirst, std::plus<double>());
+            std::array<double, 2> extremes{-range.min_val, range.max_val}, global{};
+            ippl::Comm->allreduce(extremes.data(), global.data(), 2, std::greater<double>());
+
+            FarImageMultipole result;
+            result.gaussNodes = true;
+            if (!(sums[0] > 0.0)) {
+                return result;
+            }
+            const double absMass = sums[0], absW = sums[1];
+            const double wMean   = ryoanji::gauss2Mean(absMass, absW);
+            const double cx = sums[2] / absMass, cy = sums[3] / absMass, cz = sums[4] / absMass;
+
+            // raw moments about (c, wMean); the images carry -|q| and the reversed rapidity
+            constexpr unsigned kRaw = G2i::numRaw;
+            ippl::Vector<double, kRaw> local(0.0);
+            Kokkos::parallel_reduce(
+                    "BarnesHutAlgorithm::farImageGaussMoments", nLocal,
+                    KOKKOS_LAMBDA(const size_type i, ippl::Vector<double, kRaw>& sum) {
+                        const double q  = -chargeScale * dt(i);
+                        const double w  = -longitudinalRapidity(P(i)) - wRef;
+                        const double dx = R(i)[0] - cx, dy = R(i)[1] - cy,
+                                     dz = 2.0 * planeZ - stretch.apply(R(i)[2]) - cz;
+                        ryoanji::Gauss2Qpole<double> M = ryoanji::gauss2Zero<double>();
+                        ryoanji::P2MGauss2_add<1>(
+                                &dx, &dy, &dz, &q, &w, 0, 1, ryoanji::Vec3<double>{0.0, 0.0, 0.0},
+                                wMean, M);
+                        for (unsigned c = 0; c < kRaw; ++c) {
+                            sum[c] += M[c];
+                        }
+                    },
+                    local);
+            std::array<double, kRaw> raw{};
+            for (unsigned c = 0; c < kRaw; ++c) {
+                raw[c] = local[c];
+            }
+            ippl::Comm->allreduce(raw.data(), kRaw, std::plus<double>());
+
+            result.gauss = ryoanji::gauss2Zero<double>();
+            for (unsigned c = 0; c < kRaw; ++c) {
+                result.gauss[c] = raw[c];
+            }
+            result.gauss[G2i::absMass] = absMass;  // the totals the mean was taken from
+            result.gauss[G2i::absW]    = absW;
+            ryoanji::gauss2Finalize(result.gauss, frame, velocityMoments);
+            result.macScale2 = cstone::velocityMacScale2(
+                    -global[0], global[1], wMean,
+                    ryoanji::velocityMac(frame, thetaV, velocityMoments));
+            result.centre = {cx, cy, cz};
+            result.empty  = false;
+            return result;
+        }
 
         /**
          * @brief Multipole (evaluation form, about the centre of charge) of the image charges of
@@ -975,6 +1076,8 @@ namespace opalx::spacecharge {
             auto E                                    = particles.E.getView();
             auto B                                    = particles.B.getView();
             const ryoanji::HeavisideQpole<double> M   = images.multipole;
+            const ryoanji::Gauss2Qpole<double> G      = images.gauss;
+            const bool gaussNodes                     = images.gaussNodes;
             const ryoanji::Vec3<double> centre        = images.centre;
             Kokkos::parallel_for(
                     "BarnesHutAlgorithm::farImageFieldHeaviside", particles.getLocalNum(),
@@ -982,7 +1085,8 @@ namespace opalx::spacecharge {
                         const ryoanji::Vec3<double> target{
                                 R(i)[0], R(i)[1], stretch.apply(R(i)[2])};
                         ::util::array<double, 5> acc{0.0, 0.0, 0.0, 0.0, 0.0};
-                        acc = ryoanji::M2PHeaviside(acc, target, centre, M);
+                        acc = gaussNodes ? ryoanji::M2PGauss2(acc, target, centre, G)
+                                         : ryoanji::M2PHeaviside(acc, target, centre, M);
                         E(i) += Vector_t<double, 3>(
                                 prefactor * acc[0], prefactor * acc[1], prefactor * acc[2]);
                         B(i) += Vector_t<double, 3>(prefactor * acc[3], prefactor * acc[4], 0.0);
@@ -1356,7 +1460,6 @@ namespace opalx::spacecharge {
         }
         bool imagesWereActive_m    = false;
         bool imagesWereFar_m       = false;
-        bool warnedRemoteMac_m     = false;
         double softening_m         = 0.0;  ///< Uniform h of the current solve.
         Statistics statistics_m;
 
@@ -1371,7 +1474,7 @@ namespace opalx::spacecharge {
         void pack(
                 BHLocalIndex offset, size_type nLocal, double timeStep, bool images, double planeZ,
                 ZStretch stretch, std::optional<double> referenceRapidity);
-        void reportRemoteMacFailures(std::size_t step);
+        void recordLetStatistics();
         void synchronize(bool newDomain);
         void exchangeChargeHalos();
         void traverse();
@@ -1628,20 +1731,17 @@ namespace opalx::spacecharge {
     }
 
     template <class Precision>
-    void BarnesHutAlgorithm::PrecisionImpl<Precision>::reportRemoteMacFailures(std::size_t step) {
-        // cstone builds the locally essential tree with the unscaled MAC; a remote leaf that fails
-        // the rapidity-scaled MAC is applied as a multipole anyway (0 on one rank).
-        const unsigned long long failures = solver_m->remoteMacFailures();
-        statistics_m.remoteMacFailures += failures;
-        if (failures > 0 && !warnedRemoteMac_m) {
-            Inform m("BarnesHutAlgorithm");
-            m << level1 << "WARNING: TYPE=BH with per-particle velocities on several ranks: "
-              << failures << " remote octree leaves at step " << step << " were approximated "
-              << "although their rapidity-scaled multipole acceptance criterion failed (the "
-              << "locally essential tree is not yet velocity-aware). Counted in the run summary."
-              << endl;
-            warnedRemoteMac_m = true;
-        }
+    void BarnesHutAlgorithm::PrecisionImpl<Precision>::recordLetStatistics() {
+        // Collective: every rank reaches the end of a tree solve. With per-particle velocities
+        // cstone builds the locally essential tree with the velocity-scaled MAC radii that the
+        // traversal uses, and the traversal splits target groups that meet a remote leaf failing
+        // them; the counts measure the cost of that.
+        statistics_m.remoteEvents += solver_m->takeRemoteEvents();
+        const auto let                 = solver_m->letStatistics();
+        statistics_m.haloParticles     = let.haloParticles;
+        statistics_m.alwaysOpenCells   = let.alwaysOpenCells;
+        statistics_m.scaledCells       = let.scaledCells;
+        statistics_m.maxHaloParticles  = std::max(statistics_m.maxHaloParticles, let.haloParticles);
     }
 
     template <class Precision>
@@ -1685,12 +1785,17 @@ namespace opalx::spacecharge {
             // warmup = true skips the per-solve interaction counts and stage timers (BHSTATS).
             solver_m->runSolver(/*warmup=*/!config_m.traversalStatistics);
         } catch (const std::runtime_error& error) {
+            // The BHTHETA advice is for an exhausted traversal stack, not for an incomplete locally
+            // essential tree, which is a defect to report.
+            const std::string what = error.what();
+            const bool letDefect   = what.find("locally essential tree") != std::string::npos;
             throw OpalException(
                     "BarnesHutAlgorithm::solve",
-                    std::string(error.what())
+                    what
                             + (newDomainSolve_m ? " This solve built a new domain."
                                                 : " This solve kept the previous domain.")
-                            + " Increase FIELDSOLVER BHTHETA to shorten the traversal.");
+                            + (letDefect ? std::string()
+                                         : " Increase FIELDSOLVER BHTHETA to shorten the traversal."));
         }
         synchronizeDevice();
     }
@@ -1799,9 +1904,9 @@ namespace opalx::spacecharge {
         // In the rest frame the images recede with 2 gamma times the distance to the plane; far
         // ones are one quadrupole instead of sources, which keeps the box around the bunch. The
         // per-particle direct sum always takes the images as sources.
-        // Per-particle velocities: the images become one multipole with rapidity moments once
-        // their extent passes the MAC scaled by kappa (heavisideMacScale2) and their rapidity
-        // spread passes BHTHETAV.
+        // Per-particle velocities: the images become one multipole of the selected kind
+        // (BHVELOCITYMULTIPOLE) once their extent passes the MAC scaled by kappa and their
+        // rapidity spread passes BHTHETAV (cstone::velocityMacScale2).
         const ryoanji::HeavisideFrame<double> heavisideFrame =
                 particleKinematics ? heavisideFrameOf(boost) : ryoanji::HeavisideFrame<double>{};
         const double chargeScale =
@@ -1809,10 +1914,16 @@ namespace opalx::spacecharge {
         FarImageMultipole farImageField;
         bool farImages = images && relativistic && extent > 0.0
                          && imagesAreFar(bounds, planeZ, config_m.theta);
+        const bool gaussNodes = config_m.velocityMultipole == BarnesHutVelocityMultipole::Gauss;
         if (farImages && particleKinematics) {
-            farImageField = farImageMultipole(
-                    *primary_m, stretch, bounds, planeZ, chargeScale, heavisideFrame,
-                    config_m.thetaV, config_m.velocityMoments);
+            farImageField = gaussNodes ? farImageMultipoleGauss2(
+                                                 *primary_m, stretch, planeZ, chargeScale,
+                                                 heavisideFrame, config_m.thetaV,
+                                                 config_m.velocityMoments)
+                                       : farImageMultipole(
+                                                 *primary_m, stretch, bounds, planeZ, chargeScale,
+                                                 heavisideFrame, config_m.thetaV,
+                                                 config_m.velocityMoments);
             farImages = !farImageField.empty && farImageField.macScale2 > 0.0
                         && imagesAreFar(bounds, planeZ,
                                         config_m.theta / std::sqrt(farImageField.macScale2));
@@ -1891,7 +2002,9 @@ namespace opalx::spacecharge {
             ensureSolver(sourceImages);
             if (particleKinematics) {
                 solver_m->setHeavisideParams(
-                        {heavisideFrame, config_m.thetaV, config_m.velocityMoments});
+                        {heavisideFrame, config_m.thetaV, config_m.velocityMoments,
+                         gaussNodes ? ryoanji::VelocityExpansion::Gauss2
+                                    : ryoanji::VelocityExpansion::Taylor});
             }
             IpplTimings::stopTimer(domainTimer);
             const bool newDomain = statistics_m.containerBuilds != buildsBefore;
@@ -1934,9 +2047,10 @@ namespace opalx::spacecharge {
                 const double sourceGamma = maxLongitudinalGamma(*primary_m);
                 fieldGamma               = std::max(fieldGamma, sourceGamma);
                 ++statistics_m.particleSolves;
+                statistics_m.gaussSolves += gaussNodes ? 1 : 0;
                 statistics_m.maxGamma = sourceGamma;
-                reportRemoteMacFailures(context.stepState().step);
             }
+            recordLetStatistics();
             result.backendSolves = 1;
         }
         // All particles coincide otherwise: the softened field vanishes and E stays zero.
@@ -2111,8 +2225,10 @@ namespace opalx::spacecharge {
         std::ostringstream out;
         out << "TYPE=BH: " << s.solves << " tree solves (" << s.dipoleSolves << " with dipoles), "
             << s.directSolves << " direct sums, " << s.particleSolves
-            << " solves with per-particle velocities (max gamma " << s.maxGamma << ", "
-            << s.remoteMacFailures << " remote leaves failing their rapidity MAC), "
+            << " solves with per-particle velocities (" << s.gaussSolves
+            << " tree solves with two-node Gauss multipoles, max gamma " << s.maxGamma << "), "
+            << s.remoteEvents << " remote leaves failing the MAC for a target group, "
+            << s.maxHaloParticles << " halo particles at most, "
             << s.restFrameSolves << " rest-frame boosts, "
             << s.imagePasses << " image-only passes, " << s.farImageSolves
             << " far-image quadrupoles; " << s.containerBuilds << " domain builds = 1 initial + "

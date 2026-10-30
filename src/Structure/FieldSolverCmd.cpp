@@ -166,6 +166,13 @@ FieldSolverCmd::FieldSolverCmd()
             "BHTHETAV * pi/2 in rapidity about their mean is opened instead of approximated, in "
             "(0, 1] [BH only]",
             0.25);
+    itsAttr[FIELDSOLVER::BHVELOCITYMULTIPOLE] = Attributes::makePredefinedString(
+            "BHVELOCITYMULTIPOLE",
+            "With per-particle velocities, the far field of an octree cell: TAYLOR expands it to "
+            "second order in position and rapidity; GAUSS interpolates it between two rapidity "
+            "nodes (2-point Gauss rule of the cell's rapidities), a quadrupole at each node "
+            "[BH only]",
+            {"TAYLOR", "GAUSS"}, "TAYLOR");
 
     // \todo does not work   registerOwnership(AttributeHandler::STATEMENT);
 }
@@ -321,6 +328,9 @@ std::string FieldSolverCmd::getBHRelativistic() const {
 double FieldSolverCmd::getBHThetaV() const {
     return Attributes::getReal(itsAttr[FIELDSOLVER::BHTHETAV]);
 }
+std::string FieldSolverCmd::getBHVelocityMultipole() const {
+    return Attributes::getString(itsAttr[FIELDSOLVER::BHVELOCITYMULTIPOLE]);
+}
 void FieldSolverCmd::setBHTheta(const double theta) {
     Attributes::setReal(itsAttr[FIELDSOLVER::BHTHETA], theta);
 }
@@ -353,6 +363,9 @@ void FieldSolverCmd::setBHRelativistic(const std::string& mode) {
 }
 void FieldSolverCmd::setBHThetaV(const double thetaV) {
     Attributes::setReal(itsAttr[FIELDSOLVER::BHTHETAV], thetaV);
+}
+void FieldSolverCmd::setBHVelocityMultipole(const std::string& multipole) {
+    Attributes::setPredefinedString(itsAttr[FIELDSOLVER::BHVELOCITYMULTIPOLE], multipole);
 }
 
 FieldSolverCmdType FieldSolverCmd::getFieldSolverCmdType() const {
@@ -406,7 +419,8 @@ Inform& FieldSolverCmd::printInfo(Inform& os) const {
            << "* BHSTATS      " << (getBHStatistics() ? "TRUE" : "FALSE") << '\n'
            << "* BHPRECISION  " << getBHPrecision() << '\n'
            << "* BHRELATIVISTIC " << getBHRelativistic() << '\n'
-           << "* BHTHETAV     " << getBHThetaV() << endl;
+           << "* BHTHETAV     " << getBHThetaV() << '\n'
+           << "* BHVELOCITYMULTIPOLE " << getBHVelocityMultipole() << endl;
     }
 
     if (getType() == "P3M") {

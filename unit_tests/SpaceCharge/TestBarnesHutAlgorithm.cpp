@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <utility>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -620,12 +621,22 @@ namespace opalx::spacecharge {
             }
 
             /// Per-particle velocities; by default by direct summation (exact reference checks).
-            static BarnesHutConfig particleConfig(double softening = 2.0e-5, bool direct = true,
-                                                  double theta = 0.5) {
-                BarnesHutConfig result = config(softening, theta);
-                result.kinematics      = BarnesHutKinematics::Particle;
-                result.directSum       = direct;
+            static BarnesHutConfig particleConfig(
+                    double softening = 2.0e-5, bool direct = true, double theta = 0.5,
+                    BarnesHutVelocityMultipole multipole = BarnesHutVelocityMultipole::Taylor) {
+                BarnesHutConfig result   = config(softening, theta);
+                result.kinematics        = BarnesHutKinematics::Particle;
+                result.directSum         = direct;
+                result.velocityMultipole = multipole;
                 return result;
+            }
+
+            /// Both far fields of tree cells with velocity spread (BHVELOCITYMULTIPOLE).
+            static constexpr std::array<BarnesHutVelocityMultipole, 2> kMultipoles{
+                    BarnesHutVelocityMultipole::Taylor, BarnesHutVelocityMultipole::Gauss};
+
+            static const char* nameOf(BarnesHutVelocityMultipole multipole) {
+                return multipole == BarnesHutVelocityMultipole::Gauss ? "Gauss" : "Taylor";
             }
 
             /// gamma_z = 1 / sqrt(1 - beta_z^2) of every record, the gamma of its source field.
@@ -897,9 +908,10 @@ namespace opalx::spacecharge {
 
         TEST_F(BarnesHutAlgorithmTest, ImageChargeErrorScalesWithTheta) {
             // Cells mixing reals and mirrors converge like the image-free case once their dipole
-            // is kept (measured 9.11e-4, 2.21e-4, 2.06e-5; DirectSumMediumConvergesWithTheta:
-            // 7.28e-4, 1.73e-4, 1.64e-5), so the image-free limits apply. Without the dipole the
-            // error fell only like theta^2 (5.99e-3, 3.10e-3, 1.01e-3, cubic domain).
+            // is kept (largest over 1, 3, 4 ranks: 2.15e-4, 5.76e-5, 7.98e-6;
+            // DirectSumMediumConvergesWithTheta: 1.55e-4, 3.82e-5, 4.52e-6). Limits ~2.5x these.
+            // Without the dipole the error fell only like theta^2 (5.99e-3, 3.10e-3, 1.01e-3, cubic
+            // domain).
             BunchSpec spec;
             spec.globalCount = 4000;
             spec.variableDt  = true;
@@ -916,9 +928,14 @@ namespace opalx::spacecharge {
                 const double error = rmsRelativeError(
                         after, directSumWithImages(before, kCharge, 2.0e-5, planeZ));
                 if (ippl::Comm->rank() == 0) {
-                    std::printf("[BH] images theta=%.2f rms relative error=%.3e\n", theta, error);
+                    // remote events: remote leaves applied as multipoles although they failed the
+                    // MAC for a target group (diagnostic, groups spanning several focus leaves)
+                    std::printf("[BH] images theta=%.2f rms relative error=%.3e; LET: %llu halo "
+                                "particles, %llu remote events\n",
+                                theta, error, run.algorithm->statistics().haloParticles,
+                                run.algorithm->statistics().remoteEvents);
                 }
-                EXPECT_LT(error, theta >= 0.7 ? 2.0e-3 : (theta >= 0.5 ? 5.0e-4 : 5.0e-5));
+                EXPECT_LT(error, theta >= 0.7 ? 6.0e-4 : (theta >= 0.5 ? 1.5e-4 : 2.0e-5));
                 EXPECT_LT(error, previous);
                 previous = error;
             }
@@ -1008,12 +1025,14 @@ namespace opalx::spacecharge {
                 const auto reference = directSum(before, kCharge, 1.0e-6);
                 const double error   = rmsRelativeError(after, reference);
                 if (ippl::Comm->rank() == 0) {
-                    std::printf("[BH] theta=%.2f rms relative error=%.3e\n", theta, error);
+                    std::printf("[BH] theta=%.2f rms relative error=%.3e; LET: %llu halo particles, "
+                                "%llu remote events\n",
+                                theta, error, run.algorithm->statistics().haloParticles,
+                                run.algorithm->statistics().remoteEvents);
                 }
-                // Limits ~2.5x the measured errors (7.28e-4, 1.73e-4, 1.64e-5 on 1 and 4 ranks;
-                // 1.49e-3, 3.60e-4, 3.99e-5 with the cubic domain), so an accuracy regression of
-                // BH against the direct sum fails this test.
-                const double limit = theta >= 0.7 ? 2.0e-3 : (theta >= 0.5 ? 5.0e-4 : 5.0e-5);
+                // Limits ~2.5x the largest measured errors over 1, 3, 4 ranks (1.55e-4, 3.82e-5,
+                // 4.52e-6), so an accuracy regression of BH against the direct sum fails this test.
+                const double limit = theta >= 0.7 ? 4.0e-4 : (theta >= 0.5 ? 1.0e-4 : 1.2e-5);
                 EXPECT_LT(error, limit);
                 EXPECT_LT(error, previous);
                 previous = error;
@@ -2063,12 +2082,15 @@ namespace opalx::spacecharge {
             // after emission): E and B against the lab-frame field of uniformly moving charges,
             // without and with a grounded plane (images with -q and the reversed velocity).
             const BunchSpec spec = chirpedSpec();
-            for (bool direct : {true, false}) {
+            using M = BarnesHutVelocityMultipole;
+            for (auto [direct, multipole] : {std::pair{true, M::Taylor}, std::pair{false, M::Taylor},
+                                             std::pair{false, M::Gauss}}) {
             for (bool withPlane : {false, true}) {
                 SCOPED_TRACE(direct);
+                SCOPED_TRACE(nameOf(multipole));
                 SCOPED_TRACE(withPlane);
                 const double planeZ = spec.center[2] - 2.0 * spec.sigma[2];
-                auto values         = particleConfig(2.0e-5, direct);
+                auto values         = particleConfig(2.0e-5, direct, 0.5, multipole);
                 if (withPlane) {
                     values.dirichletPlane = {.kind = DirichletPlaneType::ShiftedGreen, .planeZ = planeZ};
                 }
@@ -2084,25 +2106,72 @@ namespace opalx::spacecharge {
                 const double errorB = rmsRelativeDifference(fieldsOf(after, &Record::b), reference.b);
                 const auto gammas   = longitudinalGammas(before);
                 const double maxGamma = *std::max_element(gammas.begin(), gammas.end());
+                const auto& stats = run.algorithm->statistics();
                 if (ippl::Comm->rank() == 0) {
                     std::printf("[BH] per-particle velocities (gamma %.2f..%.2f)%s, %s: rms relative "
-                                "error E=%.3e B=%.3e\n",
+                                "error E=%.3e B=%.3e; LET: %llu halo particles, %llu always-open and "
+                                "%llu kappa-scaled cells, %llu remote events\n",
                                 *std::min_element(gammas.begin(), gammas.end()), maxGamma,
-                                withPlane ? " with images" : "", direct ? "direct" : "tree", errorE,
-                                errorB);
+                                withPlane ? " with images" : "", direct ? "direct" : nameOf(multipole),
+                                errorE, errorB, stats.haloParticles, stats.alwaysOpenCells,
+                                stats.scaledCells, stats.remoteEvents);
                 }
-                EXPECT_LT(errorE, direct ? 1.0e-10 : 1.0e-3);
-                EXPECT_LT(errorB, direct ? 1.0e-10 : 1.0e-3);
-                const auto& stats = run.algorithm->statistics();
+                // Limits ~3x the largest tree errors over 1, 3, 4 ranks and both multipoles (E 1.67e-5)
+                EXPECT_LT(errorE, direct ? 1.0e-10 : 5.0e-5);
+                EXPECT_LT(errorB, direct ? 1.0e-10 : 5.0e-5);
                 EXPECT_EQ(stats.particleSolves, 1u);
+                EXPECT_EQ(stats.gaussSolves, multipole == M::Gauss ? 1u : 0u);
                 EXPECT_EQ(stats.directSolves, direct ? 1u : 0u);
                 EXPECT_EQ(stats.solves, direct ? 0u : 1u);
                 EXPECT_EQ(stats.restFrameSolves, 0u);
                 EXPECT_EQ(stats.imagePasses, 0u);  // the images carry their own velocity
                 EXPECT_EQ(stats.farImageSolves, 0u);
-                EXPECT_EQ(stats.remoteMacFailures, 0u);
+                if (!direct) {
+                    // cstone's locally essential tree carries the velocity MAC: the bunch spans more
+                    // than BHTHETAV in rapidity (root opened), and cells away from the frame
+                    // rapidity have kappa > 1
+                    EXPECT_GT(stats.alwaysOpenCells, 0u);
+                    EXPECT_GT(stats.scaledCells, 0u);
+                }
                 EXPECT_NEAR(stats.maxGamma, maxGamma, 1.0e-12 * maxGamma);
             }
+            }
+        }
+
+        TEST_F(BarnesHutAlgorithmTest, ParticleKinematicsBunchAndImagesOnSeparateRanks) {
+            // A plane 5 sigma_z behind the chirped bunch: no particle behind it, so bunch and
+            // images occupy separate halves of the box and, on several ranks, separate ranks. Every
+            // cell that mixes them spans about 2w in rapidity and is always opened, so the locally
+            // essential tree of a bunch rank must contain image leaves as halos and vice versa.
+            const BunchSpec spec = chirpedSpec(4000);
+            const double planeZ  = spec.center[2] - 5.0 * spec.sigma[2];
+            for (auto multipole : kMultipoles) {
+            SCOPED_TRACE(nameOf(multipole));
+            auto values          = particleConfig(2.0e-5, false, 0.5, multipole);
+            values.dirichletPlane = {.kind = DirichletPlaneType::ShiftedGreen, .planeZ = planeZ};
+            Run run(values, spec);
+            const auto before = gatherAll(run.particles);
+            (void)run.solve();
+            const auto after      = gatherAll(run.particles);
+            const auto reference  = heavisideDirectSum(before, kCharge, 2.0e-5, planeZ);
+            const auto unmirrored = heavisideDirectSum(before, kCharge, 2.0e-5);
+            const double errorE = rmsRelativeDifference(fieldsOf(after, &Record::e), reference.e);
+            const double errorB = rmsRelativeDifference(fieldsOf(after, &Record::b), reference.b);
+            const double imageE = rmsRelativeDifference(unmirrored.e, reference.e);
+            const auto& stats   = run.algorithm->statistics();
+            if (ippl::Comm->rank() == 0) {
+                std::printf("[BH] per-particle bunch and images apart (%s): rms relative error "
+                            "E=%.3e B=%.3e (image share E=%.3e); LET: %llu halo particles, %llu "
+                            "always-open and %llu kappa-scaled cells, %llu remote events\n",
+                            nameOf(multipole), errorE, errorB, imageE, stats.haloParticles,
+                            stats.alwaysOpenCells, stats.scaledCells, stats.remoteEvents);
+            }
+            EXPECT_EQ(stats.farImageSolves, 0u);  // the images are part of the tree
+            EXPECT_GT(imageE, 1.0e-4);            // the plane must matter
+            EXPECT_GT(stats.alwaysOpenCells, 0u);
+            // ~3x the largest over 1, 3, 4 ranks and both multipoles (E 5.12e-5)
+            EXPECT_LT(errorE, 1.5e-4);
+            EXPECT_LT(errorB, 1.5e-4);
             }
         }
 
@@ -2141,19 +2210,27 @@ namespace opalx::spacecharge {
                 EXPECT_EQ(b.algorithm->statistics().imagePasses, 0u);
 
                 // The tree with per-particle velocities against the same boosted reference.
-                auto tree = particleConfig(2.0e-5, false);
-                tree.dirichletPlane = particle.dirichletPlane;
-                Run c(tree, spec);
-                (void)c.solve();
-                const auto rc     = gatherAll(c.particles);
-                const double treeE = rmsRelativeDifference(fieldsOf(rc, &Record::e), fieldsOf(ra, &Record::e));
-                const double treeB = rmsRelativeDifference(fieldsOf(rc, &Record::b), fieldsOf(ra, &Record::b));
-                if (ippl::Comm->rank() == 0) {
-                    std::printf("[BH] per-particle tree vs rest frame at gamma 5%s: E=%.3e B=%.3e\n",
-                                withPlane ? " with images" : "", treeE, treeB);
+                for (auto multipole : kMultipoles) {
+                    SCOPED_TRACE(nameOf(multipole));
+                    auto tree = particleConfig(2.0e-5, false, 0.5, multipole);
+                    tree.dirichletPlane = particle.dirichletPlane;
+                    Run c(tree, spec);
+                    (void)c.solve();
+                    const auto rc      = gatherAll(c.particles);
+                    const double treeE = rmsRelativeDifference(fieldsOf(rc, &Record::e), fieldsOf(ra, &Record::e));
+                    const double treeB = rmsRelativeDifference(fieldsOf(rc, &Record::b), fieldsOf(ra, &Record::b));
+                    if (ippl::Comm->rank() == 0) {
+                        const auto& s = c.algorithm->statistics();
+                        std::printf("[BH] per-particle tree (%s) vs rest frame at gamma 5%s: E=%.3e "
+                                    "B=%.3e; LET: %llu halo particles, %llu always-open cells, %llu "
+                                    "remote events\n",
+                                    nameOf(multipole), withPlane ? " with images" : "", treeE, treeB,
+                                    s.haloParticles, s.alwaysOpenCells, s.remoteEvents);
+                    }
+                    // ~3x the largest over 1, 3, 4 ranks (E 1.43e-5)
+                    EXPECT_LT(treeE, 4.0e-5);
+                    EXPECT_LT(treeB, 4.0e-5);
                 }
-                EXPECT_LT(treeE, 1.0e-3);
-                EXPECT_LT(treeB, 1.0e-3);
             }
         }
 
@@ -2164,9 +2241,12 @@ namespace opalx::spacecharge {
             spec.globalCount        = 1600;
             spec.variableDt         = true;
             spec.transverseMomentum = 0.0;
-            for (bool direct : {true, false}) {
+            using M = BarnesHutVelocityMultipole;
+            for (auto [direct, multipole] : {std::pair{true, M::Taylor}, std::pair{false, M::Taylor},
+                                             std::pair{false, M::Gauss}}) {
             SCOPED_TRACE(direct);
-            Run run(particleConfig(2.0e-5, direct), spec);
+            SCOPED_TRACE(nameOf(multipole));
+            Run run(particleConfig(2.0e-5, direct, 0.5, multipole), spec);
             const std::uint64_t half = spec.globalCount / 2;
             {
                 auto R  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), run.particles.R.getView());
@@ -2193,10 +2273,11 @@ namespace opalx::spacecharge {
             const double errorB  = rmsRelativeDifference(fieldsOf(after, &Record::b), reference.b);
             if (ippl::Comm->rank() == 0) {
                 std::printf("[BH] two bunches gamma 2 and 5 vs two exact bins (%s): E=%.3e B=%.3e\n",
-                            direct ? "direct" : "tree", errorE, errorB);
+                            direct ? "direct" : nameOf(multipole), errorE, errorB);
             }
-            EXPECT_LT(errorE, direct ? 1.0e-10 : 1.0e-3);
-            EXPECT_LT(errorB, direct ? 1.0e-10 : 1.0e-3);
+            // tree: ~3x the largest over 1, 3, 4 ranks (E 1.27e-6)
+            EXPECT_LT(errorE, direct ? 1.0e-10 : 4.0e-6);
+            EXPECT_LT(errorB, direct ? 1.0e-10 : 4.0e-6);
             }
         }
 
@@ -2284,27 +2365,32 @@ namespace opalx::spacecharge {
             // Tree with rapidity moments against the per-particle direct sum: the error falls with
             // theta like the electrostatic tree's.
             const BunchSpec spec = chirpedSpec(4000);
-            double previous      = 1.0;
+            for (auto multipole : kMultipoles) {
+            SCOPED_TRACE(nameOf(multipole));
+            double previous = 1.0;
             for (double theta : {0.7, 0.5, 0.3}) {
                 SCOPED_TRACE(theta);
-                Run run(particleConfig(2.0e-5, false, theta), spec);
+                Run run(particleConfig(2.0e-5, false, theta, multipole), spec);
                 const auto before = gatherAll(run.particles);
                 (void)run.solve();
                 const auto after     = gatherAll(run.particles);
                 const auto reference = heavisideDirectSum(before, kCharge, 2.0e-5);
                 const double errorE  = rmsRelativeDifference(fieldsOf(after, &Record::e), reference.e);
                 const double errorB  = rmsRelativeDifference(fieldsOf(after, &Record::b), reference.b);
+                const auto& stats = run.algorithm->statistics();
                 if (ippl::Comm->rank() == 0) {
-                    std::printf("[BH] per-particle tree theta=%.1f: rms relative error E=%.3e "
-                                "B=%.3e\n",
-                                theta, errorE, errorB);
+                    std::printf("[BH] per-particle tree (%s) theta=%.1f: rms relative error E=%.3e "
+                                "B=%.3e; LET: %llu halo particles, %llu remote events\n",
+                                nameOf(multipole), theta, errorE, errorB, stats.haloParticles,
+                                stats.remoteEvents);
                 }
                 EXPECT_LT(errorE, previous);
-                EXPECT_LT(errorB, theta < 0.6 ? 1.0e-3 : 3.0e-3);
-                EXPECT_EQ(run.algorithm->statistics().remoteMacFailures, 0u);
+                // ~3x the largest over 1, 3, 4 ranks and both multipoles
+                EXPECT_LT(errorB, theta < 0.6 ? 1.0e-4 : 4.0e-4);  // B 3.08e-5 (0.5), 1.29e-4 (0.7)
                 previous = errorE;
             }
-            EXPECT_LT(previous, 1.0e-4);
+            EXPECT_LT(previous, 1.5e-5);  // E 5.34e-6 at theta 0.3
+            }
         }
 
         TEST_F(BarnesHutAlgorithmTest, ParticleKinematicsNeedsRapidityMoments) {
@@ -2312,9 +2398,11 @@ namespace opalx::spacecharge {
             // frame"); that error does not fall off with distance and dominates the tree error.
             BunchSpec spec = chirpedSpec(4000);
             spec.chirp     = 1.0;  // gamma ~ 1 to 5 head to tail
-            Run with(particleConfig(2.0e-5, false), spec);
-            auto values            = particleConfig(2.0e-5, false);
-            values.velocityMoments = false;
+            for (auto multipole : kMultipoles) {
+            SCOPED_TRACE(nameOf(multipole));
+            Run with(particleConfig(2.0e-5, false, 0.5, multipole), spec);
+            auto values            = particleConfig(2.0e-5, false, 0.5, multipole);
+            values.velocityMoments = false;  // Gauss: one node at the mean rapidity
             Run without(values, spec);
             const auto before = gatherAll(with.particles);
             (void)with.solve();
@@ -2325,12 +2413,13 @@ namespace opalx::spacecharge {
             const double errorWithout = rmsRelativeDifference(
                     fieldsOf(gatherAll(without.particles), &Record::e), reference.e);
             if (ippl::Comm->rank() == 0) {
-                std::printf("[BH] per-particle tree: rms relative error E=%.3e with rapidity moments, "
-                            "%.3e at the cells' mean velocity\n",
-                            errorWith, errorWithout);
+                std::printf("[BH] per-particle tree (%s): rms relative error E=%.3e with rapidity "
+                            "moments, %.3e at the cells' mean velocity\n",
+                            nameOf(multipole), errorWith, errorWithout);
             }
-            EXPECT_LT(errorWith, 1.0e-3);
+            EXPECT_LT(errorWith, 1.0e-4);  // ~3x the largest over 1, 3, 4 ranks (3.25e-5)
             EXPECT_GT(errorWithout, 3.0 * errorWith);
+            }
         }
 
         TEST_F(BarnesHutAlgorithmTest, ParticleKinematicsFarImagesAreOneMultipole) {
@@ -2341,8 +2430,10 @@ namespace opalx::spacecharge {
             spec.chirp     = 0.1;
             const double planeZ  = spec.center[2] - 0.05;
             for (bool direct : {true, false}) {
+            for (auto multipole : kMultipoles) {  // also the far image multipole
                 SCOPED_TRACE(direct);
-                auto values           = particleConfig(2.0e-5, direct);
+                SCOPED_TRACE(nameOf(multipole));
+                auto values           = particleConfig(2.0e-5, direct, 0.5, multipole);
                 values.dirichletPlane = {.kind = DirichletPlaneType::ShiftedGreen, .planeZ = planeZ};
                 Run run(values, spec);
                 const auto before = gatherAll(run.particles);
@@ -2354,14 +2445,46 @@ namespace opalx::spacecharge {
                 const double errorB = rmsRelativeDifference(fieldsOf(after, &Record::b), reference.b);
                 const double imageE = rmsRelativeDifference(unmirrored.e, reference.e);
                 if (ippl::Comm->rank() == 0) {
-                    std::printf("[BH] per-particle far images (%s): rms relative error E=%.3e B=%.3e "
-                                "(image share E=%.3e)\n",
-                                direct ? "direct" : "tree", errorE, errorB, imageE);
+                    std::printf("[BH] per-particle far images (%s, %s images): rms relative error "
+                                "E=%.3e B=%.3e (image share E=%.3e)\n",
+                                direct ? "direct" : "tree", nameOf(multipole), errorE, errorB, imageE);
                 }
                 EXPECT_EQ(run.algorithm->statistics().farImageSolves, 1u);
                 EXPECT_GT(imageE, 1.0e-4);  // the plane must matter
-                EXPECT_LT(errorE, direct ? 1.0e-2 * imageE : 1.0e-3);
-                EXPECT_LT(errorB, direct ? 1.0e-2 * imageE : 1.0e-3);
+                // tree: ~3x the largest over 1, 3, 4 ranks and both multipoles (E 4.76e-5)
+                EXPECT_LT(errorE, direct ? 1.0e-2 * imageE : 1.5e-4);
+                EXPECT_LT(errorB, direct ? 1.0e-2 * imageE : 1.5e-4);
+            }
+            }
+        }
+
+        TEST_F(BarnesHutAlgorithmTest, ParticleKinematicsGaussVersusTaylorAtLowGamma) {
+            // A wide spread near the cathode (gamma ~ 1 to 5): both far fields against the direct
+            // sum at two opening angles. In single cells the two-node Gauss multipole is 1.5-5x
+            // more accurate than the Taylor multipole at gamma <~ 3 (ryoanji gauss2_qpole tests);
+            // this measures the whole tree. Limits ~3x the largest measured over 1, 3, 4 ranks and both multipoles (E 3.25e-5).
+            BunchSpec spec = chirpedSpec(4000);
+            spec.chirp     = 1.0;
+            for (double theta : {0.5, 0.3}) {
+                double error[2][2] = {};
+                for (int k = 0; k < 2; ++k) {
+                    Run run(particleConfig(2.0e-5, false, theta, kMultipoles[k]), spec);
+                    const auto before = gatherAll(run.particles);
+                    (void)run.solve();
+                    const auto after     = gatherAll(run.particles);
+                    const auto reference = heavisideDirectSum(before, kCharge, 2.0e-5);
+                    error[k][0] = rmsRelativeDifference(fieldsOf(after, &Record::e), reference.e);
+                    error[k][1] = rmsRelativeDifference(fieldsOf(after, &Record::b), reference.b);
+                }
+                if (ippl::Comm->rank() == 0) {
+                    std::printf("[BH] gamma 1-5, theta=%.1f: Taylor E=%.3e B=%.3e, Gauss E=%.3e "
+                                "B=%.3e\n",
+                                theta, error[0][0], error[0][1], error[1][0], error[1][1]);
+                }
+                for (int k = 0; k < 2; ++k) {
+                    EXPECT_LT(error[k][0], 1.0e-4);
+                    EXPECT_LT(error[k][1], 1.0e-4);
+                }
             }
         }
 

@@ -76,6 +76,7 @@ namespace FIELDSOLVER {
         BHPRECISION,            // DOUBLE or MIXED NBody precision policy [BH only]
         BHRELATIVISTIC,         // AUTO, FRAME or PARTICLE source velocities [BH only]
         BHTHETAV,               // Rapidity acceptance of tree cells, PARTICLE only [BH only]
+        BHVELOCITYMULTIPOLE,    // TAYLOR or GAUSS far field of tree cells, PARTICLE only [BH only]
         SIZE
     };
 }
@@ -157,6 +158,7 @@ public:
     std::string getBHPrecision() const;
     std::string getBHRelativistic() const;
     double getBHThetaV() const;
+    std::string getBHVelocityMultipole() const;
     void setPipeMode(const std::string& pipeMode);
     void setBeamRadius(double beamRadius);
     void setClosedRing(bool closedRing);
@@ -175,6 +177,7 @@ public:
     void setBHPrecision(const std::string& precision);
     void setBHRelativistic(const std::string& mode);
     void setBHThetaV(double thetaV);
+    void setBHVelocityMultipole(const std::string& multipole);
 
 private:
     // Not implemented.

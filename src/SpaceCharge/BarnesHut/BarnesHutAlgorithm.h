@@ -78,9 +78,19 @@ namespace opalx::spacecharge {
             std::size_t farImageSolves = 0;  ///< Solves with the images as one quadrupole.
             /// Solves (tree or direct sum) with per-particle source velocities (PARTICLE).
             std::size_t particleSolves = 0;
-            /// PARTICLE on several ranks: remote leaves applied as multipoles although they failed
-            /// the rapidity-scaled MAC (cstone's locally essential tree is not velocity-aware).
-            unsigned long long remoteMacFailures = 0;
+            /// Of particleSolves: tree solves with two-node Gauss multipoles (BHVELOCITYMULTIPOLE=GAUSS).
+            std::size_t gaussSolves = 0;
+            /// Tree solves on several ranks, summed: remote leaves (not in the locally essential
+            /// tree) that failed the MAC for a target group spanning several focus leaves. PARTICLE:
+            /// such group traversals are split and repeated (exact); other modes: the leaves were
+            /// applied as multipoles (diagnostic).
+            unsigned long long remoteEvents = 0;
+            /// Locally essential tree of the last tree solve, summed over ranks: halo particles, and
+            /// (PARTICLE) cells that BHTHETAV always opens and cells whose MAC radius kappa scales.
+            unsigned long long haloParticles   = 0;
+            unsigned long long alwaysOpenCells = 0;
+            unsigned long long scaledCells     = 0;
+            unsigned long long maxHaloParticles = 0;  ///< Largest haloParticles of the run.
             double maxGamma = 1.0;  ///< Largest source gamma of the last per-particle solve.
             double gamma = 1.0;  ///< Mean gamma of the last rest-frame solve.
             double softening = 0.0;  ///< Uniform softening h of the last solve (BHSOFTENINGREL).

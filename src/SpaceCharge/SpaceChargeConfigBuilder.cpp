@@ -324,6 +324,9 @@ namespace opalx::spacecharge {
             values.leafBasedSoftening              = fieldSolver.getBHLeafBasedSoftening();
             values.directSum                       = fieldSolver.getBHDirectSum();
             values.thetaV                  = fieldSolver.getBHThetaV();
+            values.velocityMultipole       = fieldSolver.getBHVelocityMultipole() == "GAUSS"
+                                                     ? BarnesHutVelocityMultipole::Gauss
+                                                     : BarnesHutVelocityMultipole::Taylor;
             const std::string relativistic = fieldSolver.getBHRelativistic();
             if (relativistic == "FRAME") {
                 values.kinematics = BarnesHutKinematics::Frame;

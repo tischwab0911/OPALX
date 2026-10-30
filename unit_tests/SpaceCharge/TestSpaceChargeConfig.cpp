@@ -455,6 +455,16 @@ namespace opalx::spacecharge {
             command.setBHThetaV(1.5);
             EXPECT_THROW((void)buildSpaceChargeConfig(command, {}), OpalException);
             command.setBHThetaV(0.25);
+            // BHVELOCITYMULTIPOLE: TAYLOR by default, GAUSS selects the two-node multipole.
+            const auto multipole = [&command] {
+                return std::get<BarnesHutConfig>(buildSpaceChargeConfig(command, {}))
+                        .velocityMultipole;
+            };
+            EXPECT_EQ(multipole(), BarnesHutVelocityMultipole::Taylor);
+            command.setBHVelocityMultipole("GAUSS");
+            EXPECT_EQ(multipole(), BarnesHutVelocityMultipole::Gauss);
+            command.setBHVelocityMultipole("TAYLOR");
+            EXPECT_EQ(multipole(), BarnesHutVelocityMultipole::Taylor);
             // The octree supports leaf-based softening with per-particle velocities too.
             command.setBHSoftening(0.0);
             command.setBHLeafBasedSoftening(true);

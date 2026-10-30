@@ -126,10 +126,23 @@ namespace opalx::spacecharge {
      *   to E and B (CartesianPIC3D with MAXBINS=1).
      * - Particle: every source contributes the field of a point charge moving uniformly along z
      *   with its own velocity, E = q gamma R / (rho^2 + gamma^2 zeta^2)^{3/2}, B = v x E / c^2, at
-     *   equal lab time; the limit of energy binning with infinitely many bins. The octree carries
-     *   rapidity moments (ryoanji HeavisideQpole); cells too wide in rapidity are opened.
+     *   equal lab time; the limit of energy binning with infinitely many bins. Octree cells carry
+     *   a velocity-aware multipole (BarnesHutVelocityMultipole); cells too wide in rapidity are
+     *   opened.
      */
     enum class BarnesHutKinematics { Static, Frame, Particle };
+
+    /**
+     * @brief Far field of an octree cell whose sources have different velocities
+     * (BarnesHutKinematics::Particle).
+     *
+     * - Taylor: joint expansion to second order in source position and rapidity (ryoanji
+     *   HeavisideQpole).
+     * - Gauss: linear interpolation between two rapidity nodes, the 2-point Gauss rule of the
+     *   cell's |q|-weighted rapidities, with a quadrupole per node about the node's regression
+     *   centre (ryoanji Gauss2Qpole).
+     */
+    enum class BarnesHutVelocityMultipole { Taylor, Gauss };
 
     /**
      * @brief Complete runtime configuration for the gridless Barnes-Hut solver (TYPE=BH).
@@ -169,6 +182,8 @@ namespace opalx::spacecharge {
         /// BHTHETAV (Particle only): a tree cell whose sources span more than BHTHETAV * pi / 2 in
         /// rapidity about their mean is opened instead of evaluated as a multipole.
         double thetaV = 0.25;
+        /// BHVELOCITYMULTIPOLE (Particle only): far field of tree cells with velocity spread.
+        BarnesHutVelocityMultipole velocityMultipole = BarnesHutVelocityMultipole::Taylor;
         /// Testing only (not an input attribute): false puts all sources of a tree cell at the
         /// cell's mean rapidity (no rapidity moments, no rapidity MAC).
         bool velocityMoments = true;
