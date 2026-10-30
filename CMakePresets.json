@@ -93,6 +93,18 @@
       }
     },
     {
+      "name": "alps-gh200-bh-develop",
+      "displayName": "Alps-GH200-BarnesHut-develop",
+      "description": "alps-gh200-bh built from the develop branches of IPPL and ryoanji",
+      "inherits": [
+        "alps-gh200-bh"
+      ],
+      "cacheVariables": {
+        "IPPL_GIT_TAG": "develop",
+        "IPPL_RYOANJI_GIT_TAG": "develop"
+      }
+    },
+    {
       "name": "alps-mi300",
       "displayName": "Alps-mi300-defaults",
       "description": "Settings for Alps MI300 with HIP (release+testing)",
